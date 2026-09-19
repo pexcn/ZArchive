@@ -2,9 +2,96 @@
 #include "zarchive/zarchivecommon.h"
 
 #include <fstream>
+#include <streambuf>
 
 #include <zstd.h>
 #include <cassert>
+
+namespace
+{
+class CallbackStreamBuf final : public std::streambuf
+{
+public:
+	CallbackStreamBuf(uint64_t size, ZArchiveReader::ReadCallback callback)
+		: m_size(size), m_callback(std::move(callback)) {}
+
+protected:
+	std::streamsize xsgetn(char* buffer, std::streamsize count) override
+	{
+		if (!buffer || count <= 0)
+			return 0;
+		const uint64_t size = static_cast<uint64_t>(count);
+		if (size > UINT32_MAX || m_position > m_size || size > m_size - m_position)
+			return 0;
+		if (!m_callback(m_position, buffer, static_cast<uint32_t>(size)))
+			return 0;
+		m_position += size;
+		return count;
+	}
+
+	pos_type seekoff(off_type offset, std::ios_base::seekdir direction,
+		std::ios_base::openmode mode) override
+	{
+		if ((mode & std::ios_base::in) == 0)
+			return pos_type(off_type(-1));
+
+		uint64_t base;
+		if (direction == std::ios_base::beg)
+			base = 0;
+		else if (direction == std::ios_base::cur)
+			base = m_position;
+		else if (direction == std::ios_base::end)
+			base = m_size;
+		else
+			return pos_type(off_type(-1));
+
+		if (offset < 0)
+		{
+			const uint64_t magnitude = static_cast<uint64_t>(-(offset + 1)) + 1;
+			if (magnitude > base)
+				return pos_type(off_type(-1));
+			m_position = base - magnitude;
+		}
+		else
+		{
+			const uint64_t magnitude = static_cast<uint64_t>(offset);
+			if (magnitude > m_size - base)
+				return pos_type(off_type(-1));
+			m_position = base + magnitude;
+		}
+		return pos_type(static_cast<off_type>(m_position));
+	}
+
+	pos_type seekpos(pos_type position, std::ios_base::openmode mode) override
+	{
+		if ((mode & std::ios_base::in) == 0)
+			return pos_type(off_type(-1));
+		const off_type offset = static_cast<off_type>(position);
+		if (offset < 0 || static_cast<uint64_t>(offset) > m_size)
+			return pos_type(off_type(-1));
+		m_position = static_cast<uint64_t>(offset);
+		return position;
+	}
+
+private:
+	uint64_t m_size{};
+	uint64_t m_position{};
+	ZArchiveReader::ReadCallback m_callback;
+};
+
+class CallbackStream final : public std::istream
+{
+public:
+	CallbackStream(uint64_t size, ZArchiveReader::ReadCallback callback)
+		: std::istream(nullptr), m_buffer(size, std::move(callback))
+	{
+		rdbuf(&m_buffer);
+	}
+
+private:
+	CallbackStreamBuf m_buffer;
+};
+}
 
 static uint64_t _istream_getFileSize(std::istream& stream)
 {
@@ -96,6 +183,14 @@ ZArchiveReader* ZArchiveReader::OpenFromStream(std::unique_ptr<std::istream>&& s
 
 	ZArchiveReader* cfs = new ZArchiveReader(std::move(stream), std::move(offsetRecords), std::move(nameTable), std::move(fileTree), footer.sectionCompressedData.offset, footer.sectionCompressedData.size);
 	return cfs;
+}
+
+ZArchiveReader* ZArchiveReader::OpenFromCallbacks(uint64_t fileSize, ReadCallback readCallback)
+{
+	if (!readCallback)
+		return nullptr;
+	auto stream = std::make_unique<CallbackStream>(fileSize, std::move(readCallback));
+	return OpenFromStream(std::move(stream));
 }
 
 ZArchiveReader::ZArchiveReader(std::unique_ptr<std::istream>&& stream, std::vector<_ZARCHIVE::CompressionOffsetRecord>&& offsetRecords, std::vector<uint8_t>&& nameTable, std::vector<_ZARCHIVE::FileDirectoryEntry>&& fileTree, uint64_t compressedDataOffset, uint64_t compressedDataSize) :

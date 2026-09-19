@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <string_view>
@@ -19,6 +20,8 @@ static inline ZArchiveNodeHandle ZARCHIVE_INVALID_NODE = 0xFFFFFFFF;
 class ZArchiveReader
 {
 public:
+	using ReadCallback = std::function<bool(uint64_t offset, void* buffer, uint32_t size)>;
+
 	struct DirEntry
 	{
 		std::string_view name;
@@ -29,6 +32,7 @@ public:
 
 	static ZArchiveReader* OpenFromFile(const std::filesystem::path& path);
 	static ZArchiveReader* OpenFromStream(std::unique_ptr<std::istream>&& stream);
+	static ZArchiveReader* OpenFromCallbacks(uint64_t fileSize, ReadCallback readCallback);
 
 	~ZArchiveReader();
 
